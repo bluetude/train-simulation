@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Symulacja pociągu – Nowy Sącz → Krynica</title>
+
+    <style>
+        body {
+            font-family: monospace;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .controls {
+            margin-bottom: 10px;
+        }
+        canvas {
+            background: #fff;
+            border: 1px solid #ccc;
+        }
+        label {
+            display: block;
+        }
+        button {
+            margin-right: 5px;
+        }
+        pre {
+            background: #fff;
+            padding: 10px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+
+<body>
+
+<h2>Symulacja pociągu: Nowy Sącz → Krynica</h2>
+
+<div class="controls">
+    <label>
+        Moc silnika [W]:
+        <input type="range" id="power" min="0" max="2000000" step="50000" value="600000">
+        <strong><span id="powerVal">600000</span> W</strong>
+    </label>
+
+    <label>
+        Hamulec T+ [N]:
+        <input type="range" id="brake" min="0" max="500000" step="10000" value="0">
+        <strong><span id="brakeVal">0</span> N</strong>
+    </label>
+
+    <br>
+    <button id="start">START</button>
+    <button id="stopBtn">STOP</button>
+    <button id="reset">RESET</button>
+</div>
+
+<h5>Kliknij w dowolnym punkcie trasy poniżej aby "teleportować" pociąg.</h5>
+<canvas id="canvas" width="800" height="250"></canvas>
+
+<pre id="output">Kliknij START</pre>
+<footer style="
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    font-size: 12px;
+    color: #555;
+    text-align: center;
+    background: #f5f5f5;
+    padding: 6px 0;
+    border-top: 1px solid #ccc;
+">
+    Zadanie symulacyjne przygotowane na zajęcia z fizyki przez Marcina Barcza.
+</footer>
+
+<script>
+    // =====================
+    // PROFIL WYSOKOŚCI
+    // =====================
+    const elevationProfile = [
+        290,292,295,298,302,307,313,320,328,337,
+        347,358,370,382,395,408,420,
+        415,408,400,392,385,378,372,
+        368,370,374,380,387,395,
+        404,414,425,437,450,
+        462,475,488,502,517,
+        532,548,565,580
+    ];
+
+    const segmentLength = 50000 / (elevationProfile.length - 1);
+
+    // =====================
+    // PARAMETRY FIZYCZNE
+    // =====================
+    const m = 275000;
+    const g = 9.81;
+    const mu = 0.003;
+
+    const rho = 1.2;
+    const Cd = 1.8;
+    const A = 10;
+
+    const Pmax = 2000000;
+    const Fmax = 300000;
+
+    // =====================
+    // ZMIENNE SYMULACJI
+    // =====================
+    let x = 0;
+    let v = 0;
+    let dt = 0.1;
+    let timer = null;
+
+    // =====================
+    // WYSOKOŚĆ + NACHYLENIE
+    // =====================
+    function height(x) {
+        const i = Math.floor(x / segmentLength);
+        if (i < 0) return elevationProfile[0];
+        if (i >= elevationProfile.length - 1)
+            return elevationProfile[elevationProfile.length - 1];
+
+        const h1 = elevationProfile[i];
+        const h2 = elevationProfile[i + 1];
+        const t = (x - i * segmentLength) / segmentLength;
+        return h1 + t * (h2 - h1);
+    }
+
+    function slope(x) {
+        const dx = 5;
+        return (height(x + dx) - height(x)) / dx;
+    }
+
+    // =====================
+    // CANVAS – RYSOWANIE
+    // =====================
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    function drawTrain(x, y) {
+        const angle = Math.atan(slope(x));
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+
+        ctx.fillStyle = "#c00";
+        ctx.fillRect(-10, -6, 20, 12);
+
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(-6, -4, 4, 4);
+        ctx.fillRect(2, -4, 4, 4);
+
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.arc(-6, 7, 2, 0, 2 * Math.PI);
+        ctx.arc(6, 7, 2, 0, 2 * Math.PI);
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const minH = Math.min(...elevationProfile);
+        const maxH = Math.max(...elevationProfile);
+
+        // Profil trasy
+        ctx.beginPath();
+        elevationProfile.forEach((h, i) => {
+            const px = i / (elevationProfile.length - 1) * canvas.width;
+            const py = canvas.height - (h - minH) / (maxH - minH) * canvas.height;
+            i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        });
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Pociąg – czerwona kropka
+        const trainX = x / 50000 * canvas.width;
+        const trainY = canvas.height -
+            (height(x) - minH) / (maxH - minH) * canvas.height;
+
+        // ctx.beginPath();
+        // ctx.arc(trainX, trainY, 6, 0, 2 * Math.PI);
+        // ctx.fillStyle = "red";
+        // ctx.fill();
+        drawTrain(trainX, trainY);
+    }
+
+    // =====================
+    // KROK SYMULACJI
+    // =====================
+    function step() {
+        const P = Math.min(+power.value, Pmax);
+        const Tplus = +brake.value;
+
+        const alpha = slope(x);
+
+        const Fg = m * g * alpha;
+        const Ft = mu * m * g;
+        const Fair = 0.5 * rho * Cd * A * v * v;
+
+        const F_power = P / Math.max(v, 0.5);
+        const Feng = Math.min(F_power, Fmax);
+
+        const F = Feng - Fg - Ft - Fair - Tplus;
+        const a = F / m;
+
+        v += a * dt;
+        v = Math.max(v, 0);
+        x += v * dt;
+
+        draw();
+
+        output.textContent = `
+Pozycja: ${(x/1000).toFixed(2)} km
+Wysokość: ${height(x).toFixed(1)} m
+Prędkość: ${(v*3.6).toFixed(1)} km/h
+Przyspieszenie: ${a.toFixed(3)} m/s²
+
+Siła napędu: ${Feng.toFixed(0)} N
+Siły oporu: ${(Fg + Ft + Fair + Tplus).toFixed(0)} N
+`;
+    }
+
+    // =====================
+    // PRZYCISKI
+    // =====================
+    start.onclick = () => {
+        if (!timer) timer = setInterval(step, dt * 1000);
+    };
+
+    const stopBtn = document.getElementById("stopBtn");
+
+    stopBtn.onclick = () => {
+        clearInterval(timer);
+        timer = null;
+    };
+
+    reset.onclick = () => {
+        x = 0;
+        v = 0;
+        draw();
+        output.textContent = "Zresetowano. Kliknij START.";
+    };
+
+    // Rysuj początkowy profil
+    draw();
+
+    const powerVal = document.getElementById("powerVal");
+    const brakeVal = document.getElementById("brakeVal");
+
+    function updateSliders() {
+        powerVal.textContent = (+power.value).toLocaleString("pl-PL");
+        brakeVal.textContent = (+brake.value).toLocaleString("pl-PL");
+    }
+
+    power.addEventListener("input", updateSliders);
+    brake.addEventListener("input", updateSliders);
+
+    // inicjalnie
+    updateSliders();
+
+    canvas.addEventListener("click", (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+
+        // przeliczenie px → metry
+        const newX = (clickX / canvas.width) * 50000;
+
+        teleport(newX);
+    });
+
+    function teleport(newX) {
+        x = Math.max(0, Math.min(newX, 50000));
+
+        // opcja 1: zachowaj prędkość
+        // v = v;
+
+        // opcja 2 (bezpieczniejsza dydaktycznie):
+        v = 0;
+
+        draw();
+        output.textContent = `
+Teleportacja:
+Pozycja: ${(x/1000).toFixed(2)} km
+Wysokość: ${height(x).toFixed(1)} m
+`;
+    }
+</script>
+
+</body>
+</html>
