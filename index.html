@@ -12,6 +12,13 @@
         }
         .controls {
             margin-bottom: 10px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px 20px;
+            align-items: end;
+        }
+        .controls .full {
+            grid-column: 1 / -1;
         }
         canvas {
             background: #fff;
@@ -27,6 +34,26 @@
             background: #fff;
             padding: 10px;
             border: 1px solid #ccc;
+        }
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            align-items: start;
+        }
+        .panel {
+            background: #fff;
+            border: 1px solid #ccc;
+            padding: 10px;
+        }
+        .gauge {
+            width: 100%;
+            height: 180px;
+        }
+        .charts {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
         }
     </style>
 </head>
@@ -48,14 +75,39 @@
         <strong><span id="brakeVal">0</span> N</strong>
     </label>
 
-    <br>
-    <button id="start">START</button>
-    <button id="stopBtn">STOP</button>
-    <button id="reset">RESET</button>
+    <label>
+        Paliwo (masa początkowa) [kg]:
+        <input type="range" id="fuelMass0" min="0" max="12000" step="500" value="8000">
+        <strong><span id="fuelMass0Val">8000</span> kg</strong>
+    </label>
+
+    <label>
+        Silnik spalinowy (zużycie paliwa):
+        <input type="checkbox" id="fuelEnabled" checked>
+    </label>
+
+    <div class="full">
+        <button id="start">START</button>
+        <button id="stopBtn">STOP</button>
+        <button id="reset">RESET</button>
+    </div>
 </div>
 
 <h5>Kliknij w dowolnym punkcie trasy poniżej aby "teleportować" pociąg.</h5>
 <canvas id="canvas" width="800" height="250"></canvas>
+
+<div class="row" style="margin-top: 12px;">
+    <div class="panel">
+        <h4>Prędkościomierz</h4>
+        <canvas id="speedGauge" class="gauge" width="350" height="180"></canvas>
+        <div id="fuelStatus" style="margin-top: 8px;">Paliwo: 0 kg</div>
+    </div>
+    <div class="panel charts">
+        <h4>Wykresy</h4>
+        <canvas id="chartSpeed" width="350" height="120"></canvas>
+        <canvas id="chartAccel" width="350" height="120"></canvas>
+    </div>
+</div>
 
 <pre id="output">Kliknij START</pre>
 <footer style="
@@ -92,24 +144,38 @@
     // =====================
     // PARAMETRY FIZYCZNE
     // =====================
-    const m = 275000;
+    const mTrain = 200000;
+    const mLoco = 75000;
+    let mFuel = 8000;
+    let m = mTrain + mLoco + mFuel;
     const g = 9.81;
-    const mu = 0.003;
+    const mu_rr = 0.002; // opór toczenia (mały)
+    const mu_adh = 0.15; // przyczepność koło–szyna
 
     const rho = 1.2;
     const Cd = 1.8;
     const A = 10;
 
     const Pmax = 2000000;
-    const Fmax = 300000;
+
+    // paliwo (diesel)
+    const LHV = 43e6; // J/kg
+    const eta = 0.35; // sprawność
 
     // =====================
     // ZMIENNE SYMULACJI
     // =====================
     let x = 0;
     let v = 0;
+    let t = 0;
     let dt = 0.1;
     let timer = null;
+
+    const history = {
+        t: [],
+        v: [],
+        a: []
+    };
 
     // =====================
     // WYSOKOŚĆ + NACHYLENIE
@@ -189,47 +255,89 @@
         drawTrain(trainX, trainY);
     }
 
+    function computeForces(P, Tplus) {
+        const alpha = slope(x);
+        const Fg = m * g * alpha;
+        const Ft = mu_rr * m * g;
+        const Fair = 0.5 * rho * Cd * A * v * v;
+        const F_power = P / Math.max(v, 0.5);
+        const F_adh = mu_adh * mLoco * g;
+        const Feng = Math.min(F_power, F_adh);
+        const F = Feng - Fg - Ft - Fair - Tplus;
+        const a = F / m;
+        return { Fg, Ft, Fair, F_adh, Feng, a, Tplus };
+    }
+
+    function renderStats(forces) {
+        output.textContent = `
+Pozycja: ${(x/1000).toFixed(2)} km
+Wysokość: ${height(x).toFixed(1)} m
+Prędkość: ${(v*3.6).toFixed(1)} km/h
+Przyspieszenie: ${forces.a.toFixed(3)} m/s²
+
+Siła napędu: ${forces.Feng.toFixed(0)} N
+Siły oporu: ${(forces.Fg + forces.Ft + forces.Fair + forces.Tplus).toFixed(0)} N
+Limit przyczepności: ${forces.F_adh.toFixed(0)} N
+Paliwo: ${mFuel.toFixed(0)} kg
+`;
+    }
+
+    function refreshDisplay() {
+        draw();
+        drawGauge();
+        drawCharts();
+        const P = Math.min(+power.value, Pmax);
+        const Tplus = +brake.value;
+        renderStats(computeForces(P, Tplus));
+    }
+
     // =====================
     // KROK SYMULACJI
     // =====================
     function step() {
         const P = Math.min(+power.value, Pmax);
         const Tplus = +brake.value;
+        const fuelOn = fuelEnabled.checked;
 
-        const alpha = slope(x);
+        // aktualizacja masy (paliwo)
+        if (fuelOn && P > 0 && mFuel > 0) {
+            const mdot = P / (eta * LHV); // kg/s
+            mFuel = Math.max(0, mFuel - mdot * dt);
+        }
+        m = mTrain + mLoco + mFuel;
 
-        const Fg = m * g * alpha;
-        const Ft = mu * m * g;
-        const Fair = 0.5 * rho * Cd * A * v * v;
+        const forces = computeForces(P, Tplus);
 
-        const F_power = P / Math.max(v, 0.5);
-        const Feng = Math.min(F_power, Fmax);
-
-        const F = Feng - Fg - Ft - Fair - Tplus;
-        const a = F / m;
-
-        v += a * dt;
+        v += forces.a * dt;
         v = Math.max(v, 0);
         x += v * dt;
 
+        t += dt;
+
+        // zapisz historię (do wykresów)
+        history.t.push(t);
+        history.v.push(v);
+        history.a.push(forces.a);
+        if (history.t.length > 600) {
+            history.t.shift();
+            history.v.shift();
+            history.a.shift();
+        }
+
         draw();
-
-        output.textContent = `
-Pozycja: ${(x/1000).toFixed(2)} km
-Wysokość: ${height(x).toFixed(1)} m
-Prędkość: ${(v*3.6).toFixed(1)} km/h
-Przyspieszenie: ${a.toFixed(3)} m/s²
-
-Siła napędu: ${Feng.toFixed(0)} N
-Siły oporu: ${(Fg + Ft + Fair + Tplus).toFixed(0)} N
-`;
+        drawGauge();
+        drawCharts();
+        renderStats(forces);
     }
 
     // =====================
     // PRZYCISKI
     // =====================
     start.onclick = () => {
-        if (!timer) timer = setInterval(step, dt * 1000);
+        if (!timer) {
+            timer = setInterval(step, dt * 1000);
+            fuelMass0.disabled = true;
+        }
     };
 
     const stopBtn = document.getElementById("stopBtn");
@@ -242,26 +350,158 @@ Siły oporu: ${(Fg + Ft + Fair + Tplus).toFixed(0)} N
     reset.onclick = () => {
         x = 0;
         v = 0;
+        t = 0;
+        mFuel = +fuelMass0.value;
+        m = mTrain + mLoco + mFuel;
+        history.t = [];
+        history.v = [];
+        history.a = [];
+        fuelMass0.disabled = false;
         draw();
+        drawGauge();
+        drawCharts();
         output.textContent = "Zresetowano. Kliknij START.";
     };
 
     // Rysuj początkowy profil
-    draw();
 
     const powerVal = document.getElementById("powerVal");
     const brakeVal = document.getElementById("brakeVal");
+    const fuelMass0Val = document.getElementById("fuelMass0Val");
 
     function updateSliders() {
         powerVal.textContent = (+power.value).toLocaleString("pl-PL");
         brakeVal.textContent = (+brake.value).toLocaleString("pl-PL");
+        fuelMass0Val.textContent = (+fuelMass0.value).toLocaleString("pl-PL");
     }
 
-    power.addEventListener("input", updateSliders);
-    brake.addEventListener("input", updateSliders);
+    power.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) refreshDisplay();
+    });
+    brake.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) refreshDisplay();
+    });
+    fuelMass0.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) {
+            mFuel = +fuelMass0.value;
+            m = mTrain + mLoco + mFuel;
+            refreshDisplay();
+        }
+    });
 
     // inicjalnie
     updateSliders();
+
+    // =====================
+    // PRĘDKOŚCIOMIERZ
+    // =====================
+    const gauge = document.getElementById("speedGauge");
+    const gctx = gauge.getContext("2d");
+    const fuelStatus = document.getElementById("fuelStatus");
+
+    function drawGauge() {
+        const maxKmh = 160;
+        const kmh = v * 3.6;
+        const angleMin = Math.PI * 0.75;
+        const angleMax = Math.PI * 2.25;
+        const ratio = Math.max(0, Math.min(1, kmh / maxKmh));
+        const angle = angleMin + (angleMax - angleMin) * ratio;
+
+        gctx.clearRect(0, 0, gauge.width, gauge.height);
+        gctx.fillStyle = "#fff";
+        gctx.fillRect(0, 0, gauge.width, gauge.height);
+
+        const cx = gauge.width / 2;
+        const cy = gauge.height * 0.95;
+        const r = gauge.height * 0.75;
+
+        // łuk tła
+        gctx.beginPath();
+        gctx.arc(cx, cy, r, angleMin, angleMax);
+        gctx.strokeStyle = "#ddd";
+        gctx.lineWidth = 12;
+        gctx.stroke();
+
+        // łuk wartości
+        gctx.beginPath();
+        gctx.arc(cx, cy, r, angleMin, angle);
+        gctx.strokeStyle = "#c00";
+        gctx.lineWidth = 12;
+        gctx.stroke();
+
+        // wskazówka
+        gctx.beginPath();
+        gctx.moveTo(cx, cy);
+        gctx.lineTo(cx + Math.cos(angle) * (r - 10), cy + Math.sin(angle) * (r - 10));
+        gctx.strokeStyle = "#000";
+        gctx.lineWidth = 3;
+        gctx.stroke();
+
+        // napis
+        gctx.fillStyle = "#000";
+        gctx.font = "16px monospace";
+        gctx.textAlign = "center";
+        gctx.fillText(`${kmh.toFixed(1)} km/h`, cx, gauge.height * 0.2);
+
+        fuelStatus.textContent = `Paliwo: ${mFuel.toFixed(0)} kg`;
+    }
+
+    // =====================
+    // WYKRESY
+    // =====================
+    const chartSpeed = document.getElementById("chartSpeed");
+    const chartAccel = document.getElementById("chartAccel");
+    const c1 = chartSpeed.getContext("2d");
+    const c2 = chartAccel.getContext("2d");
+
+    function drawChart(ctx, data, label, color, minY, maxY) {
+        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+        ctx.strokeStyle = "#ccc";
+        ctx.beginPath();
+        ctx.moveTo(0, ctx.canvas.height - 20);
+        ctx.lineTo(ctx.canvas.width, ctx.canvas.height - 20);
+        ctx.stroke();
+
+        if (data.length < 2) {
+            ctx.fillStyle = "#666";
+            ctx.font = "12px monospace";
+            ctx.fillText(label, 6, 14);
+            return;
+        }
+
+        const w = ctx.canvas.width;
+        const h = ctx.canvas.height - 20;
+
+        ctx.beginPath();
+        data.forEach((val, i) => {
+            const x = (i / (data.length - 1)) * w;
+            const y = h - ((val - minY) / (maxY - minY)) * h;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = "#000";
+        ctx.font = "12px monospace";
+        ctx.fillText(label, 6, 14);
+    }
+
+    function drawCharts() {
+        const speedKmh = history.v.map(s => s * 3.6);
+        const accel = history.a;
+        drawChart(c1, speedKmh, "Prędkość [km/h]", "#0072B2", 0, 160);
+        drawChart(c2, accel, "Przyspieszenie [m/s²]", "#D55E00", -1.5, 1.5);
+    }
+
+    // inicjalne odświeżenie widoku
+    refreshDisplay();
 
     canvas.addEventListener("click", (e) => {
         const rect = canvas.getBoundingClientRect();
@@ -282,7 +522,9 @@ Siły oporu: ${(Fg + Ft + Fair + Tplus).toFixed(0)} N
         // opcja 2 (bezpieczniejsza dydaktycznie):
         v = 0;
 
-        draw();
+    draw();
+    drawGauge();
+    drawCharts();
         output.textContent = `
 Teleportacja:
 Pozycja: ${(x/1000).toFixed(2)} km
