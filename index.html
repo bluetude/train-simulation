@@ -255,6 +255,42 @@
         drawTrain(trainX, trainY);
     }
 
+    function computeForces(P, Tplus) {
+        const alpha = slope(x);
+        const Fg = m * g * alpha;
+        const Ft = mu_rr * m * g;
+        const Fair = 0.5 * rho * Cd * A * v * v;
+        const F_power = P / Math.max(v, 0.5);
+        const F_adh = mu_adh * mLoco * g;
+        const Feng = Math.min(F_power, F_adh);
+        const F = Feng - Fg - Ft - Fair - Tplus;
+        const a = F / m;
+        return { Fg, Ft, Fair, F_adh, Feng, a, Tplus };
+    }
+
+    function renderStats(forces) {
+        output.textContent = `
+Pozycja: ${(x/1000).toFixed(2)} km
+Wysokość: ${height(x).toFixed(1)} m
+Prędkość: ${(v*3.6).toFixed(1)} km/h
+Przyspieszenie: ${forces.a.toFixed(3)} m/s²
+
+Siła napędu: ${forces.Feng.toFixed(0)} N
+Siły oporu: ${(forces.Fg + forces.Ft + forces.Fair + forces.Tplus).toFixed(0)} N
+Limit przyczepności: ${forces.F_adh.toFixed(0)} N
+Paliwo: ${mFuel.toFixed(0)} kg
+`;
+    }
+
+    function refreshDisplay() {
+        draw();
+        drawGauge();
+        drawCharts();
+        const P = Math.min(+power.value, Pmax);
+        const Tplus = +brake.value;
+        renderStats(computeForces(P, Tplus));
+    }
+
     // =====================
     // KROK SYMULACJI
     // =====================
@@ -263,8 +299,6 @@
         const Tplus = +brake.value;
         const fuelOn = fuelEnabled.checked;
 
-        const alpha = slope(x);
-
         // aktualizacja masy (paliwo)
         if (fuelOn && P > 0 && mFuel > 0) {
             const mdot = P / (eta * LHV); // kg/s
@@ -272,18 +306,9 @@
         }
         m = mTrain + mLoco + mFuel;
 
-        const Fg = m * g * alpha;
-        const Ft = mu_rr * m * g;
-        const Fair = 0.5 * rho * Cd * A * v * v;
+        const forces = computeForces(P, Tplus);
 
-        const F_power = P / Math.max(v, 0.5);
-        const F_adh = mu_adh * mLoco * g;
-        const Feng = Math.min(F_power, F_adh);
-
-        const F = Feng - Fg - Ft - Fair - Tplus;
-        const a = F / m;
-
-        v += a * dt;
+        v += forces.a * dt;
         v = Math.max(v, 0);
         x += v * dt;
 
@@ -292,7 +317,7 @@
         // zapisz historię (do wykresów)
         history.t.push(t);
         history.v.push(v);
-        history.a.push(a);
+        history.a.push(forces.a);
         if (history.t.length > 600) {
             history.t.shift();
             history.v.shift();
@@ -302,25 +327,17 @@
         draw();
         drawGauge();
         drawCharts();
-
-        output.textContent = `
-Pozycja: ${(x/1000).toFixed(2)} km
-Wysokość: ${height(x).toFixed(1)} m
-Prędkość: ${(v*3.6).toFixed(1)} km/h
-Przyspieszenie: ${a.toFixed(3)} m/s²
-
-Siła napędu: ${Feng.toFixed(0)} N
-Siły oporu: ${(Fg + Ft + Fair + Tplus).toFixed(0)} N
-Limit przyczepności: ${F_adh.toFixed(0)} N
-Paliwo: ${mFuel.toFixed(0)} kg
-`;
+        renderStats(forces);
     }
 
     // =====================
     // PRZYCISKI
     // =====================
     start.onclick = () => {
-        if (!timer) timer = setInterval(step, dt * 1000);
+        if (!timer) {
+            timer = setInterval(step, dt * 1000);
+            fuelMass0.disabled = true;
+        }
     };
 
     const stopBtn = document.getElementById("stopBtn");
@@ -339,6 +356,7 @@ Paliwo: ${mFuel.toFixed(0)} kg
         history.t = [];
         history.v = [];
         history.a = [];
+        fuelMass0.disabled = false;
         draw();
         drawGauge();
         drawCharts();
@@ -346,7 +364,6 @@ Paliwo: ${mFuel.toFixed(0)} kg
     };
 
     // Rysuj początkowy profil
-    draw();
 
     const powerVal = document.getElementById("powerVal");
     const brakeVal = document.getElementById("brakeVal");
@@ -358,9 +375,22 @@ Paliwo: ${mFuel.toFixed(0)} kg
         fuelMass0Val.textContent = (+fuelMass0.value).toLocaleString("pl-PL");
     }
 
-    power.addEventListener("input", updateSliders);
-    brake.addEventListener("input", updateSliders);
-    fuelMass0.addEventListener("input", updateSliders);
+    power.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) refreshDisplay();
+    });
+    brake.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) refreshDisplay();
+    });
+    fuelMass0.addEventListener("input", () => {
+        updateSliders();
+        if (!timer) {
+            mFuel = +fuelMass0.value;
+            m = mTrain + mLoco + mFuel;
+            refreshDisplay();
+        }
+    });
 
     // inicjalnie
     updateSliders();
@@ -469,6 +499,9 @@ Paliwo: ${mFuel.toFixed(0)} kg
         drawChart(c1, speedKmh, "Prędkość [km/h]", "#0072B2", 0, 160);
         drawChart(c2, accel, "Przyspieszenie [m/s²]", "#D55E00", -1.5, 1.5);
     }
+
+    // inicjalne odświeżenie widoku
+    refreshDisplay();
 
     canvas.addEventListener("click", (e) => {
         const rect = canvas.getBoundingClientRect();
